@@ -21,6 +21,8 @@
       border-radius: 8px;
       margin-top: 10px;
     }
+    .controls { margin-top: 10px; }
+    button { margin: 5px; padding: 10px 20px; font-size: 16px; border-radius: 6px; border: none; cursor: pointer; }
     .counter {
       margin-top: 15px;
       font-size: 20px;
@@ -31,15 +33,18 @@
       border-radius: 8px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.2);
     }
-    #peopleCount {
-      margin-top: 10px;
-      font-size: 18px;
-      color: #333;
-    }
+    #peopleCount { margin-top: 10px; font-size: 18px; color: #333; }
   </style>
 </head>
 <body>
   <h2>Hybrid People Counter</h2>
+  <div class="controls">
+    <button onclick="startCamera('environment')">📷 Kamera Belakang</button>
+    <button onclick="startCamera('user')">🤳 Kamera Depan</button>
+    <button onclick="stopCamera()">⛔ Stop Kamera</button>
+    <button onclick="resetCounter()">🔄 Reset Counter</button>
+  </div>
+
   <video id="video" playsinline></video>
   <canvas id="canvas"></canvas>
 
@@ -48,7 +53,7 @@
     Keluar: <span id="countOut">0</span>
   </div>
   <p id="peopleCount">Orang terdeteksi: 0</p>
-  <p id="status">⏳ Loading...</p>
+  <p id="status">⏳ Menunggu pilihan kamera...</p>
 
   <script>
     const video = document.getElementById("video");
@@ -61,12 +66,21 @@
 
     let countIn = 0, countOut = 0;
     let prevCenters = [];
+    let cameraObj = null;
 
     function updateCounter(inVal, outVal) {
       countIn += inVal;
       countOut += outVal;
       document.getElementById("countIn").innerText = countIn;
       document.getElementById("countOut").innerText = countOut;
+    }
+
+    function resetCounter() {
+      countIn = 0;
+      countOut = 0;
+      document.getElementById("countIn").innerText = countIn;
+      document.getElementById("countOut").innerText = countOut;
+      console.log("🔄 Counter di-reset manual");
     }
 
     function processCenters(centers) {
@@ -135,13 +149,10 @@
         document.getElementById("peopleCount").innerText = "Orang terdeteksi: " + centers.length;
         processCenters(centers);
       } else {
-        // fallback ke face detection
-        usePose = false;
+        usePose = false; // fallback
       }
 
-      requestAnimationFrame(() => {
-        if (usePose) detectPose();
-      });
+      if (cameraObj) requestAnimationFrame(() => { if (usePose) detectPose(); });
     }
 
     function onFaceResults(results) {
@@ -167,32 +178,39 @@
       if (centers.length > 0) {
         document.getElementById("peopleCount").innerText = "Orang terdeteksi: " + centers.length;
         processCenters(centers);
-        usePose = true; // coba balik lagi ke pose kalau berhasil
+        usePose = true; // balik ke pose lagi
       }
 
-      if (!usePose) requestAnimationFrame(() => faceDetection.send({ image: video }));
+      if (!usePose && cameraObj) requestAnimationFrame(() => faceDetection.send({ image: video }));
     }
 
-    async function init() {
-      // Load MoveNet
-      const detectorConfig = {
-        modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING
-      };
-      detector = await poseDetection.createDetector(
-        poseDetection.SupportedModels.MoveNet,
-        detectorConfig
-      );
+    async function initModels() {
+      if (!detector) {
+        const detectorConfig = {
+          modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING
+        };
+        detector = await poseDetection.createDetector(
+          poseDetection.SupportedModels.MoveNet,
+          detectorConfig
+        );
+      }
 
-      // Load MediaPipe Face
-      faceDetection = new FaceDetection.FaceDetection({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
-      });
-      faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
-      faceDetection.onResults(onFaceResults);
+      if (!faceDetection) {
+        faceDetection = new FaceDetection.FaceDetection({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
+        });
+        faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
+        faceDetection.onResults(onFaceResults);
+      }
 
-      document.getElementById("status").innerText = "✅ Model loaded";
+      document.getElementById("status").innerText = "✅ Model siap";
+    }
 
-      const camera = new Camera(video, {
+    async function startCamera(facingMode) {
+      stopCamera(); // pastikan kamera lama mati dulu
+      await initModels();
+
+      cameraObj = new Camera(video, {
         onFrame: async () => {
           if (usePose) {
             await detectPose();
@@ -200,18 +218,29 @@
             await faceDetection.send({ image: video });
           }
         },
+        facingMode: facingMode,
         width: 640,
         height: 480
       });
-      camera.start();
+      cameraObj.start();
 
       video.onloadedmetadata = () => {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
       };
+
+      document.getElementById("status").innerText = "📷 Kamera aktif (" + facingMode + ")";
     }
 
-    init();
+    function stopCamera() {
+      if (cameraObj) {
+        cameraObj.stop();
+        cameraObj = null;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        document.getElementById("status").innerText = "⛔ Kamera dihentikan";
+        document.getElementById("peopleCount").innerText = "Orang terdeteksi: 0";
+      }
+    }
   </script>
 </body>
 </html>
