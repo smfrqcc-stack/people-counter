@@ -2,12 +2,16 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>People Counter Mobile</title>
+  <title>Hybrid People Counter</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js"></script>
+
   <style>
     body { font-family: Arial, sans-serif; text-align: center; margin: 0; padding: 0; background: #fafafa; }
     video, canvas {
@@ -17,10 +21,9 @@
       border-radius: 8px;
       margin-top: 10px;
     }
-    .controls { margin: 15px 0; }
     .counter {
       margin-top: 15px;
-      font-size: 22px;
+      font-size: 20px;
       font-weight: bold;
       background: #fff;
       display: inline-block;
@@ -28,80 +31,62 @@
       border-radius: 8px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.2);
     }
+    #peopleCount {
+      margin-top: 10px;
+      font-size: 18px;
+      color: #333;
+    }
   </style>
 </head>
 <body>
-  <h2>People Counter (Mobile Ready)</h2>
-  <div class="controls">
-    <button onclick="useCamera()">📷 Kamera</button>
-    <button onclick="useVideo()">🎬 Video Test</button>
-    <button onclick="resetCounter()">🔄 Reset</button>
-  </div>
-
-  <video id="video" autoplay loop muted playsinline></video>
+  <h2>Hybrid People Counter</h2>
+  <video id="video" playsinline></video>
   <canvas id="canvas"></canvas>
-  <p id="status">Pilih mode di atas...</p>
 
   <div class="counter">
     Masuk: <span id="countIn">0</span> | 
     Keluar: <span id="countOut">0</span>
   </div>
+  <p id="peopleCount">Orang terdeteksi: 0</p>
+  <p id="status">⏳ Loading...</p>
 
   <script>
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
-    const countInEl = document.getElementById("countIn");
-    const countOutEl = document.getElementById("countOut");
 
-    let detector;
+    let detector; // MoveNet
+    let faceDetection; // MediaPipe
+    let usePose = true;
+
+    let countIn = 0, countOut = 0;
     let prevCenters = [];
-    let mode = null;
-    let localCountIn = 0;
-    let localCountOut = 0;
-
-    async function loadModel() {
-      const detectorConfig = {
-        modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING
-      };
-      detector = await poseDetection.createDetector(
-        poseDetection.SupportedModels.MoveNet,
-        detectorConfig
-      );
-      document.getElementById("status").innerText = "✅ Model loaded";
-      detectFrame();
-    }
-
-    function getCenter(keypoints) {
-      const leftHip = keypoints[23];
-      const rightHip = keypoints[24];
-      if (leftHip && rightHip && leftHip.score > 0.3 && rightHip.score > 0.3) {
-        return {
-          x: (leftHip.x + rightHip.x) / 2,
-          y: (leftHip.y + rightHip.y) / 2
-        };
-      }
-      return null;
-    }
 
     function updateCounter(inVal, outVal) {
-      localCountIn += inVal;
-      localCountOut += outVal;
-      countInEl.innerText = localCountIn;
-      countOutEl.innerText = localCountOut;
+      countIn += inVal;
+      countOut += outVal;
+      document.getElementById("countIn").innerText = countIn;
+      document.getElementById("countOut").innerText = countOut;
     }
 
-    async function detectFrame() {
-      if ((video.paused || video.ended) && mode === "video") {
-        requestAnimationFrame(detectFrame);
-        return;
-      }
+    function processCenters(centers) {
+      centers.forEach(c => {
+        prevCenters.forEach(p => {
+          const dx = c.x - p.x;
+          if (Math.abs(dx) > 40) {
+            if (p.x < canvas.width * 0.3 && c.x > canvas.width * 0.7) {
+              updateCounter(0, 1); // keluar
+            }
+            if (p.x > canvas.width * 0.7 && c.x < canvas.width * 0.3) {
+              updateCounter(1, 0); // masuk
+            }
+          }
+        });
+      });
+      prevCenters = centers;
+    }
 
-      if (!detector) return;
-      const poses = await detector.estimatePoses(video);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      // Gambar garis bantu (line crossing)
+    function drawHelpers() {
       ctx.strokeStyle = "blue";
       ctx.lineWidth = 3;
       ctx.beginPath();
@@ -114,74 +99,119 @@
       ctx.moveTo(canvas.width * 0.7, 0);
       ctx.lineTo(canvas.width * 0.7, canvas.height);
       ctx.stroke();
+    }
 
-      let newCenters = [];
+    function getCenterHip(keypoints) {
+      const leftHip = keypoints[23];
+      const rightHip = keypoints[24];
+      if (leftHip && rightHip && leftHip.score > 0.2 && rightHip.score > 0.2) {
+        return {
+          x: (leftHip.x + rightHip.x) / 2,
+          y: (leftHip.y + rightHip.y) / 2
+        };
+      }
+      return null;
+    }
 
+    async function detectPose() {
+      if (!detector) return;
+      const poses = await detector.estimatePoses(video);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      drawHelpers();
+
+      let centers = [];
       poses.forEach(pose => {
-        const center = getCenter(pose.keypoints);
-        if (center) {
-          newCenters.push(center);
-
+        const c = getCenterHip(pose.keypoints);
+        if (c) {
+          centers.push(c);
           ctx.fillStyle = "red";
           ctx.beginPath();
-          ctx.arc(center.x, center.y, 6, 0, 2 * Math.PI);
+          ctx.arc(c.x, c.y, 6, 0, 2 * Math.PI);
           ctx.fill();
-
-          prevCenters.forEach(p => {
-            const dx = center.x - p.x;
-            if (Math.abs(dx) > 50) {
-              if (p.x < canvas.width * 0.3 && center.x > canvas.width * 0.7) {
-                updateCounter(0, 1); // keluar
-                console.log("Keluar");
-              }
-              if (p.x > canvas.width * 0.7 && center.x < canvas.width * 0.3) {
-                updateCounter(1, 0); // masuk
-                console.log("Masuk");
-              }
-            }
-          });
         }
       });
 
-      prevCenters = newCenters;
-      requestAnimationFrame(detectFrame);
+      if (centers.length > 0) {
+        document.getElementById("peopleCount").innerText = "Orang terdeteksi: " + centers.length;
+        processCenters(centers);
+      } else {
+        // fallback ke face detection
+        usePose = false;
+      }
+
+      requestAnimationFrame(() => {
+        if (usePose) detectPose();
+      });
     }
 
-    async function useCamera() {
-      mode = "camera";
-      document.getElementById("status").innerText = "📷 Menggunakan kamera...";
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: false
+    function onFaceResults(results) {
+      ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+      drawHelpers();
+
+      let centers = [];
+      results.detections.forEach(d => {
+        const box = d.locationData.relativeBoundingBox;
+        const x = (box.xmin + box.width / 2) * canvas.width;
+        const y = (box.ymin + box.height / 2) * canvas.height;
+        centers.push({ x, y });
+
+        ctx.strokeStyle = "orange";
+        ctx.strokeRect(box.xmin * canvas.width, box.ymin * canvas.height,
+                       box.width * canvas.width, box.height * canvas.height);
+        ctx.fillStyle = "blue";
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, 2 * Math.PI);
+        ctx.fill();
       });
-      video.srcObject = stream;
+
+      if (centers.length > 0) {
+        document.getElementById("peopleCount").innerText = "Orang terdeteksi: " + centers.length;
+        processCenters(centers);
+        usePose = true; // coba balik lagi ke pose kalau berhasil
+      }
+
+      if (!usePose) requestAnimationFrame(() => faceDetection.send({ image: video }));
+    }
+
+    async function init() {
+      // Load MoveNet
+      const detectorConfig = {
+        modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING
+      };
+      detector = await poseDetection.createDetector(
+        poseDetection.SupportedModels.MoveNet,
+        detectorConfig
+      );
+
+      // Load MediaPipe Face
+      faceDetection = new FaceDetection.FaceDetection({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
+      });
+      faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
+      faceDetection.onResults(onFaceResults);
+
+      document.getElementById("status").innerText = "✅ Model loaded";
+
+      const camera = new Camera(video, {
+        onFrame: async () => {
+          if (usePose) {
+            await detectPose();
+          } else {
+            await faceDetection.send({ image: video });
+          }
+        },
+        width: 640,
+        height: 480
+      });
+      camera.start();
+
       video.onloadedmetadata = () => {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
-        loadModel();
       };
     }
 
-    async function useVideo() {
-      mode = "video";
-      document.getElementById("status").innerText = "🎬 Memutar video test...";
-      video.src = "https://cdn.pixabay.com/vimeo/264362119/people-33315.mp4?width=640";
-      video.loop = true;
-      video.muted = true;
-      video.play();
-      video.onloadeddata = () => {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        loadModel();
-      };
-    }
-
-    function resetCounter() {
-      localCountIn = 0;
-      localCountOut = 0;
-      countInEl.innerText = 0;
-      countOutEl.innerText = 0;
-    }
+    init();
   </script>
 </body>
 </html>
